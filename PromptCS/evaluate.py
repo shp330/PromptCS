@@ -2,7 +2,7 @@ import argparse
 import re
 from bleu import bleuFromMaps
 from sentence_transformers import SentenceTransformer, util
-
+import math
 
 def splitPuncts(line):
     """
@@ -19,10 +19,7 @@ def euclidean_distance(x, y):
     """
     if len(x) != len(y):
         raise ValueError("向量 x 和 y 的长度必须相同")
-    distance = 0.0
-    for xi, yi in zip(x, y):
-        distance += (xi - yi) ** 2
-    return distance ** 0.5
+    return math.dist(x, y)
 
 
 def sentence_bert_score_cos(output, gold):

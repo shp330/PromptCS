@@ -1,0 +1,3 @@
+# 先包含核心依赖
+-r requirements.txt
+openai==0.28.0

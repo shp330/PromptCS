@@ -5,14 +5,25 @@ from sentence_transformers import SentenceTransformer, util
 
 
 def splitPuncts(line):
+    """
+    将输入字符串 line 中的单词和非空白的非单词字符（主要是标点符号）分割开，并用空格连接成一个新的字符串。
+    """
     return ' '.join(re.findall(r"[\w]+|[^\s\w]", line))
 
 
 def euclidean_distance(x, y):
+    """
+    欧几里得距离
+    x: 多维向量 x
+    y: 多维向量 y
+    """
+    if len(x) != len(y):
+        raise ValueError("向量 x 和 y 的长度必须相同")
     distance = 0.0
-    for i in range(len(x)):
-        distance += (x[i] - y[i])**2
-    return distance**0.5
+    for xi, yi in zip(x, y):
+        distance += (xi - yi) ** 2
+    return distance ** 0.5
+
 
 def sentence_bert_score_cos(output, gold):
     embeddings1 = model.encode(output, convert_to_tensor=True)

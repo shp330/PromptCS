@@ -7,6 +7,9 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, RobertaConfig, Rob
 
 class PromptCS(nn.Module):
     def __init__(self, args, device, template):
+        """
+        args.mode: finetune 微调
+        """
         super(PromptCS, self).__init__()
         self.args = args
         self.mode = args.mode
@@ -34,7 +37,22 @@ class PromptCS(nn.Module):
         # load pre-trained model
         self.model = create_model(self.args, self.use_lm_finetune)
         self.model = self.model.to(self.device)
+        # 深度学习中常见的"模型参数梯度控制"操作，通常出现在使用 PyTorch 的场景中
+        # self.model.parameters() 返回模型中所有可训练参数（如权重、偏置）的迭代器,
+        # 这些参数是 torch.nn.Parameter 类型，属于 torch.Tensor 的子类。
         for param in self.model.parameters():
+            ##### param.requires_grad 是 Tensor 的一个布尔属性，决定该参数是否需要计算梯度。
+            # 默认情况下，大多数参数的 requires_grad=True
+            # True：在反向传播（loss.backward()）时会计算梯度，可用于优化器更新,如 optimizer.step()。
+            # False：不计算梯度，不参与训练。
+            #
+            ##### self.use_lm_finetune，表示是否对语言模型进行微调（fine-tune）。
+            # 如果是 True：保留梯度，允许模型参数更新（即进行微调）。
+            # 如果是 False：冻结模型参数，不更新（通常用于仅使用模型推理，或只训练其他部分，如适配层）。
+            #
+            # 根据 self.use_lm_finetune 的值，决定是否冻结整个模型的参数。
+            # self.use_lm_finetune = True：所有参数 requires_grad = True, 模型可以被微调（训练）
+            # 如果为 False：所有参数 requires_grad = False, 模型被冻结，不参与梯度更新，仅用于前向推理
             param.requires_grad = self.use_lm_finetune
         self.embeddings = get_embedding_layer(self.args, self.model)
 
@@ -52,6 +70,9 @@ class PromptCS(nn.Module):
         self.loss_fct = nn.CrossEntropyLoss(ignore_index=self.pad_token_id, reduction='sum')
 
     def get_special_token_id(self):
+        """
+        获取所使用模型（args.model_name_or_path）的特殊的token id
+        """
         pad_token_id, sep_token_id, eos_token_id, unk_token_id = None, None, None, None
         model_name = self.args.model_name_or_path.lower()
         if 'starcoder' in model_name:
@@ -95,16 +116,18 @@ class PromptCS(nn.Module):
         return raw_embeds
 
     def get_query(self, x_h, x_t=None):
-        left = self.prompt_tokens * self.template[0] + self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(x_h)[:self.max_code_length]) + self.prompt_tokens * self.template[1]
+        left = self.prompt_tokens * self.template[0] + self.tokenizer.convert_tokens_to_ids(
+            self.tokenizer.tokenize(x_h)[:self.max_code_length]) + self.prompt_tokens * self.template[1]
 
         if x_t is not None:
-            right = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(x_t)[:self.max_target_length]) + self.eos_tokens
+            right = self.tokenizer.convert_tokens_to_ids(
+                self.tokenizer.tokenize(x_t)[:self.max_target_length]) + self.eos_tokens
         else:
             right = []
 
         input_ids = left + self.sep_tokens + right
 
-        return torch.LongTensor(input_ids),  len(left)
+        return torch.LongTensor(input_ids), len(left)
 
     def prepare_inputs(self, inputs):
         inputs = pad_sequence(inputs, True, padding_value=self.pad_token_id).long().to(self.device)
@@ -120,7 +143,6 @@ class PromptCS(nn.Module):
             attention_mask = attention_mask.half()
 
         return inputs, inputs_embeds, attention_mask
-
 
     def forward(self, x_hs=None, x_ts=None):
         bz = len(x_hs)
@@ -142,7 +164,7 @@ class PromptCS(nn.Module):
             for i in range(bz):
                 idx = sum_idx[i]
                 shift_logits = logits[i][idx:-1, :].contiguous()
-                shift_labels = inputs[i][idx+1:].contiguous()
+                shift_labels = inputs[i][idx + 1:].contiguous()
 
                 if loss is None:
                     loss = self.loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
@@ -169,7 +191,7 @@ class PromptCS(nn.Module):
                 for i in range(bz):
                     idx = tmp_idx[i]
                     tmp_idx[i] += 1
-                    next_token_logits = logits[i, idx:idx+1, :]
+                    next_token_logits = logits[i, idx:idx + 1, :]
                     _, next_token = torch.max(next_token_logits, dim=1)
 
                     queries[i] = torch.cat([queries[i].to(self.device), next_token], dim=0)
@@ -177,15 +199,14 @@ class PromptCS(nn.Module):
             answer = []
             for i in range(bz):
                 idx = sum_idx[i]
-                t = queries[i][idx+1:]
-                t=t.tolist()
+                t = queries[i][idx + 1:]
+                t = t.tolist()
                 if self.eos_token_id in t:
                     t = t[:t.index(self.eos_token_id)]
-                words = self.tokenizer.decode(t).replace('\n','')
+                words = self.tokenizer.decode(t).replace('\n', '')
                 answer.append(words)
 
             return answer
-
 
 
 class PromptAgent(torch.nn.Module):
@@ -208,17 +229,16 @@ class PromptAgent(torch.nn.Module):
 
         if args.prompt_encoder_type == "lstm":
             self.prompt_encoder = Encoder_BiLSTM(input_size=self.hidden_size,
-                                           hidden_size=self.hidden_size // 2,
-                                           num_layers=2,
-                                           dropout=0.0,
-                                           bidirectional=True,
-                                           batch_first=True)
+                                                 hidden_size=self.hidden_size // 2,
+                                                 num_layers=2,
+                                                 dropout=0.0,
+                                                 bidirectional=True,
+                                                 batch_first=True)
         elif args.prompt_encoder_type == "transformer":
             self.prompt_encoder = Encoder_Transformer(d_model=self.hidden_size,
-                                                  nhead=8,
-                                                  num_layers=6,
-                                                  max_len=len(self.cloze_mask[0]))
-
+                                                      nhead=8,
+                                                      num_layers=6,
+                                                      max_len=len(self.cloze_mask[0]))
 
         self.embedding = torch.nn.Embedding(len(self.cloze_mask[0]), self.embed_size).to(self.device)
         self.mlp_head = nn.Sequential(nn.Linear(self.hidden_size, self.hidden_size),
@@ -237,11 +257,11 @@ class Encoder_BiLSTM(nn.Module):
     def __init__(self, input_size, hidden_size, num_layers, dropout, bidirectional, batch_first):
         super(Encoder_BiLSTM, self).__init__()
         self.lstm_head = torch.nn.LSTM(input_size=input_size,
-                                           hidden_size=hidden_size,
-                                           num_layers=num_layers,
-                                           dropout=dropout,
-                                           bidirectional=bidirectional,
-                                           batch_first=batch_first)
+                                       hidden_size=hidden_size,
+                                       num_layers=num_layers,
+                                       dropout=dropout,
+                                       bidirectional=bidirectional,
+                                       batch_first=batch_first)
 
     def forward(self, inputs):
         outputs = self.lstm_head(inputs)[0]
@@ -264,6 +284,7 @@ class Encoder_Transformer(nn.Module):
 
         return outputs
 
+
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, dropout=0.1, max_len=2501):
         super(PositionalEncoding, self).__init__()
@@ -284,15 +305,38 @@ class PositionalEncoding(nn.Module):
         return self.dropout(x)
 
 
-def create_model(args, use_lm_finetune):
+def create_model(args, use_lm_finetune: bool):
+    """
+    根据指定路径（args.model_name_or_path）加载一个因果语言模型（如 GPT），
+    如果不需要微调，则将其转为半精度以节省显存；否则保持全精度用于训练。
+    use_lm_finetune：是否使用微调
+    """
+    # AutoModelForCausalLM 自动加载一个自回归语言模型（如 GPT 系列）
     model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path)
+    # 如果不进行微调（即 use_lm_finetune 为 False），则将模型的参数转换为半精度浮点数（16位）
+    # .half() 是 PyTorch 的方法，将模型从默认的 float32 转换为 float16
+    # 目的：减少显存占用，加快推理速度，适用于仅进行推理（inference）而不训练的场景。
     if not use_lm_finetune:
         model = model.half()
     return model
 
 
-def get_embedding_layer(args, model):
+def get_embedding_layer(args, model) -> torch.nn.Embedding:
+    """
+    从一个预训练语言模型中提取其输入嵌入层（Input Embedding Layer）
+    :return torch.nn.Embedding(vocab_size, hidden_size)，
+            vocab_size：词表大小（如 30522 for BERT）
+            hidden_size：嵌入向量维度（如 768 for BERT）
+    """
+    #### base_model 是 Hugging Face 模型结构中的常见属性;
+    # 作用是访问模型的“主干网络”部分，而不是顶层的输出头（如 lm_head）
+    #
+    # 对于使用 PeftModel（如 LoRA 微调）的模型，model.base_model 指向底层的原始预训练模型;
+    # 对于普通模型（如直接用 AutoModel.from_pretrained() 加载的），
+    # model.base_model 通常指向模型自身的主干部分（如 RobertaModel、LlamaModel 等）。
+    #
+    #### .get_input_embeddings() 是 Hugging Face Transformers 模型提供的一个标准方法。
+    # 它返回模型的输入嵌入层，即，将输入的 token ID 映射为【词向量（word embeddings）】的那层。
+    # 通常是 torch.nn.Embedding 类型的一个模块。
+    # 例如，对于 GPT、BERT、LLaMA 等模型，输入是 token IDs，第一层就是把这个 ID 查表转换成一个稠密向量（embedding）。
     return model.base_model.get_input_embeddings()
-        
-
-

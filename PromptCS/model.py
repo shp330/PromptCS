@@ -3,12 +3,24 @@ import torch.nn as nn
 import torch
 from torch.nn.utils.rnn import pad_sequence
 from transformers import AutoModelForCausalLM, AutoTokenizer, RobertaConfig, RobertaModel
+from typing import List
 
 
 class PromptCS(nn.Module):
-    def __init__(self, args, device, template):
+    def __init__(self, args, device, template: List[int]):
         """
-        args.mode: finetune 微调
+        args:
+            args.mode: finetune 微调 | PromptCS
+            args.max_target_length
+            args.max_code_length
+        template: 表示 prompt 模板的结构。每个元素表示对应 segment 的长度（即多少个 token）。
+                  模板：[CLS] + 文本 + [prompt] + 文本 + [SEP]
+                       # 1个[CLS], 5个prompt token, 1个[SEP], 文本长度为0（由输入决定）
+                       # 0：表示由原始输入文本占据的位置（长度可变）
+                       # >0：表示可训练的 soft prompt 或 hard prompt 占据的位置（长度固定）
+                       self.template = [1, 0, 5, 0, 1]
+
+        device: <UNK>
         """
         super(PromptCS, self).__init__()
         self.args = args
@@ -57,7 +69,15 @@ class PromptCS(nn.Module):
         self.embeddings = get_embedding_layer(self.args, self.model)
 
         # load prompt encoder
+        # embedding_dim 嵌入向量的维度。用途：
+        # 1、后续层（如 LSTM、Transformer）需要知道输入的维度。
+        # 2、用于初始化可训练的 soft prompt 向量、LoRA 适配器等
         self.hidden_size = self.embeddings.embedding_dim
+        #### 计算 soft prompt 的总长度
+        # 整个 prompt 模板中所有固定 token 的总数（包括 [CLS], [SEP], [MASK], soft prompt 等）。
+        ## 作用：
+        # 1、在 P-tuning 中，spell_length 表示需要可训练的连续向量个数（soft prompt 长度）。
+        # 2、用于初始化一个形状为[batch_size, spell_length, hidden_size] 的可训练嵌入矩阵。
         self.spell_length = sum(self.template)
 
         if args.mode == 'PromptCS':
@@ -66,7 +86,42 @@ class PromptCS(nn.Module):
 
         self.max_target_length = args.max_target_length
         self.max_code_length = args.max_code_length
+        #### 自然语言处理（NLP）任务中损失计算相关的核心部分，常见于序列生成模型（如语言模型、机器翻译、文本摘要）或分类任务中
+        ## 将模型输出的原始 logits 转换为 log-probabilities，便于后续计算负对数似然（NLL）损失。
+        #
+        ## 它对输入张量进行 Log-Softmax 操作：
+        #  1、先计算 Softmax：将原始 logits 转换为概率分布（值在 0~1 之间，总和为 1）。
+        #  2、再取对数（log）：得到 log-probabilities。
+        #
+        ## dim=-1 表示在最后一个维度上进行操作。
+        # 对于语言模型输出：logits.shape = [batch_size, sequence_length, vocab_size],
+        # dim=-1 就是对 vocab_size 维度做 LogSoftmax，即每个 token 对应的词表上所有词的概率分布
+        #
+        ## 为什么用 LogSoftmax 而不是 Softmax？
+        #  1、数值稳定性：直接计算 log(softmax(x)) 容易下溢或上溢。
+        #  2、PyTorch 的 LogSoftmax 使用了稳定的算法（如减去最大值）来避免数值问题
+        #
+        # lsm：LogSoftmax 缩写
         self.lsm = nn.LogSoftmax(dim=-1)
+
+        #### PyTorch 提供的交叉熵损失函数，用于分类任务，等价于 LogSoftmax + NLLLoss 的组合。
+        # 输入：原始 logits（不需要先做 softmax）。
+        # 输出：标量损失值。
+        #
+        ## ignore_index=self.pad_token_id，指定一个 token ID，在计算损失时忽略该 token。
+        #  self.pad_token_id 通常是 [PAD] 的 ID（如 0）。
+        #  在批处理中，不同长度的序列会被 padding 到相同长度，这些 padding 位置不应参与损失计算。
+        #
+        ## reduction='sum'，控制损失的归约方式；使用 'sum' 意味着：总损失是所有非 padding 位置损失值的总和。
+        #  'mean'：取平均（默认）
+        #  'sum'：求和
+        #  'none'：不归约，返回每个样本的损失
+        #
+        ## 为什么用 'sum'？
+        #  1、在某些训练策略中（如梯度累积、动态 batch size），使用 sum 比 mean 更容易控制学习率和梯度尺度。
+        #  2、特别是在序列到序列任务中，按 sum 计算可以更好地反映整体生成质量。
+        #
+        # fct：Function 缩写
         self.loss_fct = nn.CrossEntropyLoss(ignore_index=self.pad_token_id, reduction='sum')
 
     def get_special_token_id(self):

@@ -314,6 +314,8 @@ class PromptAgent(torch.nn.Module):
                                                       num_layers=6,
                                                       max_len=len(self.cloze_mask[0]))
         #### 创建一个可训练的嵌入层，用于生成 soft prompt 的初始向量表示。
+        ##   self.embedding 相当于创建了一个可训练的查找表，该表可在 forward 前向过程中供查询使用
+        #
         # 总共 len(self.cloze_mask[0]) 个虚拟 token（即整个 prompt 长度）
         # 每个 token 映射为 embed_size 维的向量
         # 这些向量在训练过程中会被优化，相当于“学习一段最优的 prompt”
@@ -350,8 +352,27 @@ class PromptAgent(torch.nn.Module):
         print("init prompt encoder...")
 
     def forward(self):
+        """
+        对所有 prompt 嵌入向量进行学习
+        """
+        '''
+        ## 从 self.embedding 查找表中按 self.seq_indices 索引指定的顺序和位置取出嵌入向量。
+           输出是一个张量，形状为[num_embeddings, embedding_dim], 其中 num_embeddings = len(self.seq_indices)
+           索引指示取出【哪些位置的向量、顺序怎样、是否重复】。比如：
+             self.embedding([0, 0, 1, 1])  # 可以重复使用同一个向量
+             self.embedding([3, 2, 1, 0])  # 可以反序
+        ## unsqueeze() 用来给张量（tensor）增加一个新的维度，维度大小为 1。常用于：
+           1、给数据增加 batch 维度（从 (seq_len, dim) 变成 (1, seq_len, dim)）
+           2、为了满足某些操作对输入维度数量的要求（比如矩阵乘法、卷积等）
+        '''
         input_embeds = self.embedding(self.seq_indices).unsqueeze(0)
         output_embeds = self.prompt_encoder(input_embeds)
+        '''
+        squeeze() 删除张量（tensor）中“所有”大小为 1 的维度;squeeze(dim)：只删除指定且大小为 1 的维度。
+        常用在：
+        1、去掉多余的 batch 维度（当 batch_size = 1 时）
+        2、清理计算过程中产生的不必要的单元素维度
+        '''
         output_embeds = self.mlp_head(output_embeds).squeeze()
         return output_embeds
 

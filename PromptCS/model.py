@@ -13,6 +13,7 @@ class PromptCS(nn.Module):
             args.mode: finetune 微调 | PromptCS
             args.max_target_length
             args.max_code_length
+            args.prompt_encoder_type: transformer | lstm
         template: 表示 prompt 模板的结构。每个元素表示对应 segment 的长度（即多少个 token）。
                   模板：[CLS] + 文本 + [prompt] + 文本 + [SEP]
                        # 1个[CLS], 5个prompt token, 1个[SEP], 文本长度为0（由输入决定）
@@ -273,13 +274,31 @@ class PromptAgent(torch.nn.Module):
         self.embed_size = hidden_size
         self.tokenizer = tokenizer
         self.args = args
-        # ent embedding
+        #### ent embedding
+        ## 记录每个可训练或预测区域的长度。
+        #
+        #  基于模板的实体嵌入（Entity Embedding）或完形填空（Cloze）任务中构建序列结构的一部分，
+        #  常见于 Prompt-based Learning（如 PET、P-tuning）等方法中。
+        #
+        ## template 是一个列表，表示 prompt 模板中每个 "cloze"（完形填空）部分的长度。
+        #  例如：template = [5, 3] 表示有两个填空区域，第一个长 5 个 token，第二个长 3 个 token。
         self.cloze_length = template
+        # 构造 mask 列表，标识哪些位置属于 cloze 区域（需要预测或关注的位置）
+        # 列表长度为两个 cloze 长度之和；
+        # 注意：此处为嵌套列表；外层是 batch 维度（虽然只有一行），内层是序列长度。
+        # 如：cloze_length=[2, 3]
+        #    cloze_mask = [1, 1, 1, 1, 1]
         self.cloze_mask = [
             [1] * self.cloze_length[0]  # first cloze
             + [1] * self.cloze_length[1]  # second cloze
         ]
+        # 将 Python 列表转为 PyTorch 张量；
+        # .bool(): 将张量值转为布尔类型（True/False），便于后续用作 mask【1 -> 转为 True】
+        # 在前向传播中，可以用它来索引或掩码出 cloze 区域的隐藏状态。
+        #
+        # 如：假设 cloze_length=[2,3]，tensor shape 为 [1, 5]：tensor([[True, True, True, True, True]])
         self.cloze_mask = torch.LongTensor(self.cloze_mask).bool().to(self.device)
+        # self.cloze_mask[0] 是第一个（也是唯一一个）序列的 mask，长度为 cloze_length[0] + cloze_length[1]
         self.seq_indices = torch.LongTensor(list(range(len(self.cloze_mask[0])))).to(self.device)
 
         if args.prompt_encoder_type == "lstm":
@@ -294,8 +313,37 @@ class PromptAgent(torch.nn.Module):
                                                       nhead=8,
                                                       num_layers=6,
                                                       max_len=len(self.cloze_mask[0]))
-
+        #### 创建一个可训练的嵌入层，用于生成 soft prompt 的初始向量表示。
+        # 总共 len(self.cloze_mask[0]) 个虚拟 token（即整个 prompt 长度）
+        # 每个 token 映射为 embed_size 维的向量
+        # 这些向量在训练过程中会被优化，相当于“学习一段最优的 prompt”
+        #
+        ## torch.nn.Embedding(n_embeddings, embedding_dim): 向量个数、向量纬度
+        # 1、PyTorch 的嵌入层，用于将离散的索引映射为连续的向量。
+        # 2、结构上是一个可训练的二维张量：[vocab_size, embedding_dim]
+        #
+        ## len(self.cloze_mask[0])
+        # cloze_mask 是一个布尔张量，形状通常是 [1, total_length] 或 [total_length]
+        # len(cloze_mask[0]) 取出第一个序列（即唯一一个模板序列）, 并计算其长度，
+        # 表示要为【多少个位置】创建可训练的嵌入向量。这些“位置”不是词表中的 token，
+        # 而是 prompt 模板中的虚拟 token 位置（例如 soft prompt 的每个 slot）
+        #
+        ## self.embed_size 每个嵌入向量的维度。
+        # 通常等于模型的 hidden_size（如 BERT 的 768），以便与模型输入对齐
+        #
+        ## .to(self.device) 将嵌入层移动到指定设备（CPU/GPU）
         self.embedding = torch.nn.Embedding(len(self.cloze_mask[0]), self.embed_size).to(self.device)
+        #### 创建两层的 MLP（多层感知机），也叫 Projection Head 或 Transformation Head。
+        ## MLP 作用：将随机初始化的 prompt embeddings 进行非线性变换，
+        # 使其更接近真实 token 的 embedding 分布，以提升训练稳定性和效果
+        #
+        ## 实验表明，在 P-tuning 中加入 MLP 能显著提升性能。
+        #
+        ## self.embedding 和 self.mlp_head 都是可训练参数，在训练时会被优化。
+        #
+        ## nn.Linear(in, out) 全连接层，参数：in_features, out_features 输入、输出维度
+        #
+        ## 最后一层线性变换：将特征映射回原始维度
         self.mlp_head = nn.Sequential(nn.Linear(self.hidden_size, self.hidden_size),
                                       nn.ReLU(),
                                       nn.Linear(self.hidden_size, self.hidden_size))

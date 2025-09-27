@@ -9,19 +9,20 @@ from typing import List
 class PromptCS(nn.Module):
     def __init__(self, args, device, template: List[int]):
         """
-        args:
-            args.mode: finetune 微调 | PromptCS
+        :param args:
+            args.mode: finetune | PromptCS
             args.max_target_length
             args.max_code_length
             args.prompt_encoder_type: transformer | lstm
-        template: 表示 prompt 模板的结构。每个元素表示对应 segment 的长度（即多少个 token）。
-                  模板：[CLS] + 文本 + [prompt] + 文本 + [SEP]
-                       # 1个[CLS], 5个prompt token, 1个[SEP], 文本长度为0（由输入决定）
-                       # 0：表示由原始输入文本占据的位置（长度可变）
-                       # >0：表示可训练的 soft prompt 或 hard prompt 占据的位置（长度固定）
-                       self.template = [1, 0, 5, 0, 1]
-
-        device: <UNK>
+        :param device:
+        :param template:
+            表示 prompt 模板的结构。每个元素表示对应 segment 的长度（即多少个 token）。
+            模板：[CLS] + 文本 + [prompt] + 文本 + [SEP]
+                 # 1个[CLS], 5个prompt token, 1个[SEP], 文本长度为0（由输入决定）
+                 # 0：表示由原始输入文本占据的位置（长度可变）
+                 # >0：表示可训练的 soft prompt 或 hard prompt 占据的位置（长度固定）
+                 self.template = [1, 0, 5, 0, 1]
+        :return:
         """
         super(PromptCS, self).__init__()
         self.args = args
@@ -156,9 +157,19 @@ class PromptCS(nn.Module):
             return self.finetune_embed_input(queries)
 
     def finetune_embed_input(self, queries):
+        """
+        获取微调模式的输入嵌入向量
+        :param queries:
+        :return:
+        """
         return self.embeddings(queries)
 
     def cstuning_embed_input(self, queries):
+        """
+        获取PromptCS模式的输入嵌入向量
+        :param queries:
+        :return:
+        """
         bz = queries.shape[0]
         queries_for_embedding = queries.clone()
         queries_for_embedding[(queries == self.pseudo_token_id)] = self.unk_token_id
@@ -172,6 +183,11 @@ class PromptCS(nn.Module):
         return raw_embeds
 
     def get_query(self, x_h, x_t=None):
+        """
+        :param x_h:
+        :param x_t:
+        :return:
+        """
         left = self.prompt_tokens * self.template[0] + self.tokenizer.convert_tokens_to_ids(
             self.tokenizer.tokenize(x_h)[:self.max_code_length]) + self.prompt_tokens * self.template[1]
 
@@ -186,6 +202,10 @@ class PromptCS(nn.Module):
         return torch.LongTensor(input_ids), len(left)
 
     def prepare_inputs(self, inputs):
+        """
+        :param inputs:
+        :return:
+        """
         inputs = pad_sequence(inputs, True, padding_value=self.pad_token_id).long().to(self.device)
 
         attention_mask = inputs != self.pad_token_id
@@ -201,6 +221,11 @@ class PromptCS(nn.Module):
         return inputs, inputs_embeds, attention_mask
 
     def forward(self, x_hs=None, x_ts=None):
+        """
+        :param x_hs:
+        :param x_ts:
+        :return:
+        """
         bz = len(x_hs)
 
         if x_ts is not None:
@@ -433,7 +458,8 @@ def create_model(args, use_lm_finetune: bool):
     """
     根据指定路径（args.model_name_or_path）加载一个因果语言模型（如 GPT），
     如果不需要微调，则将其转为半精度以节省显存；否则保持全精度用于训练。
-    use_lm_finetune：是否使用微调
+    :param args:
+    :param use_lm_finetune: 是否使用微调
     """
     # AutoModelForCausalLM 自动加载一个自回归语言模型（如 GPT 系列）
     model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path)

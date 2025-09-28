@@ -259,8 +259,8 @@ class PromptCS(nn.Module):
         if x_ts is not None:
             inputs, sum_idx, ext_inputs = [], [], []
             for i in range(bz):
-                input, idx = self.get_query(x_hs[i], x_ts[i])
-                inputs.append(input)
+                input_ids, idx = self.get_query(x_hs[i], x_ts[i])
+                inputs.append(input_ids)
                 sum_idx.append(idx)
 
             inputs, inputs_embeds, attention_mask = self.prepare_inputs(inputs)

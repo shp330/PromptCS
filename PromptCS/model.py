@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch
 from torch.nn.utils.rnn import pad_sequence
 from transformers import AutoModelForCausalLM, AutoTokenizer, RobertaConfig, RobertaModel
-from typing import List
+from typing import List, Tuple
 
 
 class PromptCS(nn.Module):
@@ -43,7 +43,7 @@ class PromptCS(nn.Module):
         self.tokenizer.add_special_tokens({'additional_special_tokens': ['[PROMPT]']})
         self.pseudo_token_id = self.tokenizer.get_vocab()['[PROMPT]']
         self.pad_token_id, self.sep_token_id, self.eos_token_id, self.unk_token_id = self.get_special_token_id()
-
+        # prompt_tokens、sep_tokens、eos_tokens 必须为list，否则后续 [] * int 和 [] + [] 运算会报错
         self.prompt_tokens = [self.pseudo_token_id]
         self.sep_tokens = [self.sep_token_id]
         self.eos_tokens = [self.eos_token_id]
@@ -151,6 +151,9 @@ class PromptCS(nn.Module):
         return pad_token_id, sep_token_id, eos_token_id, unk_token_id
 
     def embed_input(self, queries):
+        """
+        对输入进行嵌入
+        """
         if self.mode == 'PromptCS':
             return self.cstuning_embed_input(queries)
         else:
@@ -182,16 +185,39 @@ class PromptCS(nn.Module):
                 raw_embeds[bidx, blocked_indices[bidx, i], :] = replace_embeds[i, :]
         return raw_embeds
 
-    def get_query(self, x_h, x_t=None):
+    def get_query(self, x_h, x_t=None) -> Tuple[torch.Tensor, int]:
         """
-        :param x_h:
-        :param x_t:
-        :return:
+        构造 Prompt-based 输入；最终结构为：[P][P] head [P] [SEP] target [EOS]
+        在代码-文本匹配任务中，x_t 代表代码，x_t 代表描述
+        :param x_h: 头实体
+        :param x_t: 目标实体
+        :return: input_ids: 张量形式的 token IDs
+                 len(left): left 部分的长度，用于后续定位关键位置（如 [MASK] 或 prompt 区域）;
+                 len(left) 作用:
+                    1、在 forward 中用于计算 attention mask
+                    2、或用于提取 prompt embeddings 的位置
+                    3、或作为 sum_idx 用于定位生成起始位置
         """
+        '''
+        self.tokenizer.tokenize(x_h) 对头实体分词，并取最大代码长度
+        tokenizer.convert_tokens_to_ids 转为 token ID
+        比如：
+            prompt_tokens = [1000]（自定义虚拟 token ID）
+            template = [2, 1]                → 前面加 2 个 prompt token，后面加 1 个
+            x_h = "def add(a,b): return a+b" → tokenize 后取前 N 个
+            left = [1000,1000] + [ids of x_h] + [1000]
+        左右：构建包含 soft prompt 和头实体的左侧上下文。    
+        '''
         left = self.prompt_tokens * self.template[0] + self.tokenizer.convert_tokens_to_ids(
             self.tokenizer.tokenize(x_h)[:self.max_code_length]) + self.prompt_tokens * self.template[1]
 
         if x_t is not None:
+            '''
+            对尾实体或目标文本分词并截取最大长度后转为token id，之后添加结束符
+            作用：
+                1、训练时：提供监督信号（完整序列）
+                2、推理时：x_t=None，right=[]，模型需自回归生成
+            '''
             right = self.tokenizer.convert_tokens_to_ids(
                 self.tokenizer.tokenize(x_t)[:self.max_target_length]) + self.eos_tokens
         else:
@@ -222,10 +248,12 @@ class PromptCS(nn.Module):
 
     def forward(self, x_hs=None, x_ts=None):
         """
-        :param x_hs:
-        :param x_ts:
+        这种设计通常用于支持多种输入模式（比如有时只传历史，有时同时传历史和目标）
+        :param x_hs: 头实体序列（head sequence）
+        :param x_ts: 目标实体序列（target sequence）
         :return:
         """
+        # batch size
         bz = len(x_hs)
 
         if x_ts is not None:

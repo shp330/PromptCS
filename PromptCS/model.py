@@ -1,6 +1,7 @@
 import math
 import torch.nn as nn
 import torch
+from torch import Tensor
 from torch.nn.utils.rnn import pad_sequence
 from transformers import AutoModelForCausalLM, AutoTokenizer, RobertaConfig, RobertaModel
 from typing import List, Tuple
@@ -152,7 +153,7 @@ class PromptCS(nn.Module):
 
     def embed_input(self, queries):
         """
-        对输入进行嵌入
+        根据 mode（PromptCS | Finetune） 对输入进行嵌入
         """
         if self.mode == 'PromptCS':
             return self.cstuning_embed_input(queries)
@@ -167,12 +168,13 @@ class PromptCS(nn.Module):
         """
         return self.embeddings(queries)
 
-    def cstuning_embed_input(self, queries):
+    def cstuning_embed_input(self, queries: Tensor):
         """
         获取PromptCS模式的输入嵌入向量
-        :param queries:
+        :param queries: 经过填充的输入token id
         :return:
         """
+        # batch size
         bz = queries.shape[0]
         queries_for_embedding = queries.clone()
         queries_for_embedding[(queries == self.pseudo_token_id)] = self.unk_token_id
@@ -185,7 +187,7 @@ class PromptCS(nn.Module):
                 raw_embeds[bidx, blocked_indices[bidx, i], :] = replace_embeds[i, :]
         return raw_embeds
 
-    def get_query(self, x_h, x_t=None) -> Tuple[torch.Tensor, int]:
+    def get_query(self, x_h, x_t=None) -> Tuple[torch.LongTensor, int]:
         """
         构造 Prompt-based 输入；最终结构为：[P][P] head [P] [SEP] target [EOS]
         在代码-文本匹配任务中，x_t 代表代码，x_t 代表描述
@@ -227,10 +229,14 @@ class PromptCS(nn.Module):
 
         return torch.LongTensor(input_ids), len(left)
 
-    def prepare_inputs(self, inputs):
+    def prepare_inputs(self, inputs: List[torch.LongTensor]) -> Tuple[
+        torch.LongTensor, torch.LongTensor, torch.LongTensor]:
         """
-        :param inputs:
-        :return:
+        使用 pad_token_id 对输入 token ids 进行填充，并将"批量维度"置于第一个
+        :param inputs: 输入 ids 列表
+        :return: 填充后的输入token ids Tensor,
+                 输入嵌入
+                 注意力掩码嵌入
         """
         inputs = pad_sequence(inputs, True, padding_value=self.pad_token_id).long().to(self.device)
 
@@ -257,6 +263,7 @@ class PromptCS(nn.Module):
         bz = len(x_hs)
 
         if x_ts is not None:
+            # 所有输入的ids
             inputs, sum_idx, ext_inputs = [], [], []
             for i in range(bz):
                 input_ids, idx = self.get_query(x_hs[i], x_ts[i])
@@ -319,6 +326,15 @@ class PromptCS(nn.Module):
 
 
 class PromptAgent(torch.nn.Module):
+    """
+    torch.nn.Module 实现了 __call__ 方法，它会自动调用自定义的 forward 方法。
+    PyTorch 官方明确建议：始终使用 model(input)，而不是 model.forward(input)
+    执行 output = model(input) 时，实际执行的是：
+        output = model.__call__(input)  # Module 的 __call__ 方法
+    而 __call__ 内部会调用：
+        output = model.forward(input)  # 自定义的 forward 方法
+    """
+
     def __init__(self, template, hidden_size, tokenizer, device, args):
         super().__init__()
         self.device = device
@@ -417,6 +433,7 @@ class PromptAgent(torch.nn.Module):
         ## unsqueeze() 用来给张量（tensor）增加一个新的维度，维度大小为 1。常用于：
            1、给数据增加 batch 维度（从 (seq_len, dim) 变成 (1, seq_len, dim)）
            2、为了满足某些操作对输入维度数量的要求（比如矩阵乘法、卷积等）
+        ## embedding(input_ids) 实际上是：embedding.__call__(input_ids) → embedding.forward(input_ids)   
         '''
         input_embeds = self.embedding(self.seq_indices).unsqueeze(0)
         output_embeds = self.prompt_encoder(input_embeds)
@@ -501,7 +518,8 @@ def create_model(args, use_lm_finetune: bool):
 
 def get_embedding_layer(args, model) -> torch.nn.Embedding:
     """
-    从一个预训练语言模型中提取其输入嵌入层（Input Embedding Layer）
+    从一个预训练语言模型中提取其输入嵌入层（Input Embedding Layer），即，
+    将输入的 token ID 映射为【词向量（word embeddings）】的那层。
     :return torch.nn.Embedding(vocab_size, hidden_size)，
             vocab_size：词表大小（如 30522 for BERT）
             hidden_size：嵌入向量维度（如 768 for BERT）

@@ -159,43 +159,62 @@ class PromptCS(nn.Module):
 
         return pad_token_id, sep_token_id, eos_token_id, unk_token_id
 
-    def embed_input(self, queries):
+    def embed_input(self, queries_token_ids: Tensor) -> Tensor:
         """
-        根据 mode（PromptCS | Finetune） 对输入进行嵌入
-        Attributes:
-            queries: 输入
+        根据 mode（PromptCS | Finetune） 对输入的 prompt token的嵌入向量进行学习，并返回学习结果嵌入张量张量
+
+        Args:
+            queries_token_ids(Tensor): Token id. 大小为 B x L x * 的张量. B 为批次大小；L 为填充后的序列长度
+
+        Returns:
+            Tensor: 输入中的 prompt token 的嵌入学习结果张量
+
         """
         if self.mode == 'PromptCS':
-            return self.cstuning_embed_input(queries)
+            return self.cstuning_embed_input(queries_token_ids)
         else:
-            return self.finetune_embed_input(queries)
+            return self.finetune_embed_input(queries_token_ids)
 
-    def finetune_embed_input(self, queries):
+    def finetune_embed_input(self, queries_token_ids):
         """
         获取微调模式的输入嵌入向量
-        :param queries:
-        :return:
-        """
-        return self.embeddings(queries)
 
-    def cstuning_embed_input(self, queries: Tensor):
+        Args:
+            queries_token_ids: 经过填充的输入 token id 张量
+
+        Returns:
+            所有输入 token 的嵌入向量张量
+
+        """
+        return self.embeddings(queries_token_ids)
+
+    def cstuning_embed_input(self, queries_token_ids: Tensor):
         """
         获取PromptCS模式的输入嵌入向量
-        Attributes:
-            queries: 经过填充的输入token id
-        :param queries: 经过填充的输入token id
-        :return:
+
+        Args:
+            queries_token_ids:  经过填充的输入 token id 张量
+
+        Returns:
+            Tensor: 学习后的 prompt embeddings
+
         """
         # batch size
-        bz = queries.shape[0]
-        queries_for_embedding = queries.clone()
-        queries_for_embedding[(queries == self.pseudo_token_id)] = self.unk_token_id
+        bz = queries_token_ids.shape[0]
+        queries_for_embedding = queries_token_ids.clone()
+        # 从输入 token ids 中获取伪 prompt token ids？？
+        queries_for_embedding[(queries_token_ids == self.pseudo_token_id)] = self.unk_token_id
+        # 从输入token id 查询嵌入向量张量
         raw_embeds = self.embeddings(queries_for_embedding)
-
-        blocked_indices = (queries == self.pseudo_token_id).nonzero().reshape((bz, self.spell_length, 2))[:, :, 1]  # bz
+        # ？？
+        blocked_indices = (queries_token_ids == self.pseudo_token_id).nonzero().reshape((bz, self.spell_length, 2))[:,
+                          :, 1]  # bz
+        # 学习后的 prompt embedding
+        # 对象调用，执行 forward 方法，得到 prompt 输出嵌入张量
         replace_embeds = self.prompt_agent()
         for bidx in range(bz):
             for i in range(self.prompt_agent.spell_length):
+                # 更新 prompt embedding
                 raw_embeds[bidx, blocked_indices[bidx, i], :] = replace_embeds[i, :]
         return raw_embeds
 
@@ -247,19 +266,24 @@ class PromptCS(nn.Module):
 
         return torch.LongTensor(input_ids), len(left)
 
-    def prepare_inputs(self, inputs: List[torch.LongTensor]) -> Tuple[
+    def prepare_inputs(self, batch_input_ids: List[torch.LongTensor]) -> Tuple[
         torch.LongTensor, torch.LongTensor, torch.LongTensor]:
         """
         使用 pad_token_id 对输入 token ids 进行填充，并将"批量维度"置于第一个
-        :param inputs: 输入 ids 列表
-        :return: 填充后的输入token ids Tensor,
-                 输入嵌入
-                 注意力掩码嵌入
-        """
-        inputs = pad_sequence(inputs, True, padding_value=self.pad_token_id).long().to(self.device)
 
-        attention_mask = inputs != self.pad_token_id
-        inputs_embeds = self.embed_input(inputs)
+        Args:
+            batch_input_ids: 批次所有输入的 token ids 列表
+
+        Returns:
+            填充后的输入token ids Tensor,
+            输入嵌入,
+            注意力掩码嵌入
+        """
+        batch_input_ids = pad_sequence(batch_input_ids, True, padding_value=self.pad_token_id).long().to(self.device)
+
+        #
+        attention_mask = batch_input_ids != self.pad_token_id
+        inputs_embeds = self.embed_input(batch_input_ids)
 
         inputs_embeds = inputs_embeds.to(self.device)
         attention_mask = attention_mask.to(self.device)
@@ -268,7 +292,7 @@ class PromptCS(nn.Module):
             inputs_embeds = inputs_embeds.half()
             attention_mask = attention_mask.half()
 
-        return inputs, inputs_embeds, attention_mask
+        return batch_input_ids, inputs_embeds, attention_mask
 
     def forward(self, x_hs: List[str] = None, x_ts: List[str] = None):
         """
@@ -300,6 +324,7 @@ class PromptCS(nn.Module):
             loss = None
 
             for i in range(bz):
+                # ？？
                 idx = sum_idx[i]
                 shift_logits = logits[i][idx:-1, :].contiguous()
                 shift_labels = batch_input_ids[i][idx + 1:].contiguous()
@@ -355,6 +380,10 @@ class PromptAgent(torch.nn.Module):
         output = model.__call__(input)  # Module 的 __call__ 方法
     而 __call__ 内部会调用：
         output = model.forward(input)  # 自定义的 forward 方法
+
+    Attributes:
+        spell_length(int): prompt template 的长度
+
     """
 
     def __init__(self, template, hidden_size, tokenizer, device, args):
@@ -442,19 +471,27 @@ class PromptAgent(torch.nn.Module):
                                       nn.Linear(self.hidden_size, self.hidden_size))
         print("init prompt encoder...")
 
-    def forward(self):
+    def forward(self) -> Tensor:
         """
         对所有 prompt 嵌入向量进行学习
+        1、根据 index 查找 prompt 嵌入；
+        2、通过 prompt agent 进行编码；
+        3、将编码结果经过 MLP 后，得到输出嵌入向量
+        Returns:
+            输出嵌入向量
         """
+
         '''
         ## 从 self.embedding 查找表中按 self.seq_indices 索引指定的顺序和位置取出嵌入向量。
            输出是一个张量，形状为[num_embeddings, embedding_dim], 其中 num_embeddings = len(self.seq_indices)
            索引指示取出【哪些位置的向量、顺序怎样、是否重复】。比如：
              self.embedding([0, 0, 1, 1])  # 可以重复使用同一个向量
              self.embedding([3, 2, 1, 0])  # 可以反序
+              
         ## unsqueeze() 用来给张量（tensor）增加一个新的维度，维度大小为 1。常用于：
            1、给数据增加 batch 维度（从 (seq_len, dim) 变成 (1, seq_len, dim)）
            2、为了满足某些操作对输入维度数量的要求（比如矩阵乘法、卷积等）
+           
         ## embedding(input_ids) 实际上是：embedding.__call__(input_ids) → embedding.forward(input_ids)   
         '''
         input_embeds = self.embedding(self.seq_indices).unsqueeze(0)

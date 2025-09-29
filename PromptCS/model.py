@@ -286,13 +286,13 @@ class PromptCS(nn.Module):
 
         if x_ts is not None:
             # 同一批次样本所有输入的ids
-            inputs, sum_idx, ext_inputs = [], [], []
+            batch_input_ids, sum_idx, ext_inputs = [], [], []
             for i in range(bz):
                 input_ids, idx = self.get_query(x_hs[i], x_ts[i])
-                inputs.append(input_ids)
+                batch_input_ids.append(input_ids)
                 sum_idx.append(idx)
 
-            inputs, inputs_embeds, attention_mask = self.prepare_inputs(inputs)
+            batch_input_ids, inputs_embeds, attention_mask = self.prepare_inputs(batch_input_ids)
 
             output = self.model(inputs_embeds=inputs_embeds, attention_mask=attention_mask)
 
@@ -302,7 +302,7 @@ class PromptCS(nn.Module):
             for i in range(bz):
                 idx = sum_idx[i]
                 shift_logits = logits[i][idx:-1, :].contiguous()
-                shift_labels = inputs[i][idx + 1:].contiguous()
+                shift_labels = batch_input_ids[i][idx + 1:].contiguous()
 
                 if loss is None:
                     loss = self.loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
@@ -321,7 +321,7 @@ class PromptCS(nn.Module):
                 tmp_idx.append(idx)
 
             for _ in range(self.max_target_length):
-                inputs, inputs_embeds, attention_mask = self.prepare_inputs(queries)
+                batch_input_ids, inputs_embeds, attention_mask = self.prepare_inputs(queries)
 
                 output = self.model(inputs_embeds=inputs_embeds, attention_mask=attention_mask)
 

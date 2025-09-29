@@ -3,11 +3,19 @@ import torch.nn as nn
 import torch
 from torch import Tensor
 from torch.nn.utils.rnn import pad_sequence
-from transformers import AutoModelForCausalLM, AutoTokenizer, RobertaConfig, RobertaModel
+from transformers import AutoModelForCausalLM, AutoTokenizer, RobertaConfig, RobertaModel, PreTrainedModel
 from typing import List, Tuple
 
 
 class PromptCS(nn.Module):
+    """
+    Attributes:
+        mode: finetune 或 PromptCS
+        model: prompt agent 底层使用的模型
+    """
+    mode: str
+    model: PreTrainedModel
+
     def __init__(self, args, device, template: List[int]):
         """
         :param args:
@@ -154,6 +162,8 @@ class PromptCS(nn.Module):
     def embed_input(self, queries):
         """
         根据 mode（PromptCS | Finetune） 对输入进行嵌入
+        Attributes:
+            queries: 输入
         """
         if self.mode == 'PromptCS':
             return self.cstuning_embed_input(queries)
@@ -171,6 +181,8 @@ class PromptCS(nn.Module):
     def cstuning_embed_input(self, queries: Tensor):
         """
         获取PromptCS模式的输入嵌入向量
+        Attributes:
+            queries: 经过填充的输入token id
         :param queries: 经过填充的输入token id
         :return:
         """
@@ -465,12 +477,28 @@ class Encoder_BiLSTM(nn.Module):
 
 class Encoder_Transformer(nn.Module):
     def __init__(self, d_model, nhead, num_layers, max_len):
+        """
+
+        Args:
+            d_model:
+            nhead:
+            num_layers:
+            max_len:
+        """
         super(Encoder_Transformer, self).__init__()
         self.encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead)
         self.encoder = nn.TransformerEncoder(self.encoder_layer, num_layers=num_layers)
         self.pos_embedding = PositionalEncoding(d_model, 0.1, max_len)
 
     def forward(self, inputs):
+        """
+
+        Args:
+            inputs:
+
+        Returns:
+
+        """
         input_embedding = self.pos_embedding(inputs)
         input_embedding = input_embedding.permute(1, 0, 2)
 
@@ -481,6 +509,13 @@ class Encoder_Transformer(nn.Module):
 
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, dropout=0.1, max_len=2501):
+        """
+
+        Args:
+            d_model:
+            dropout:
+            max_len:
+        """
         super(PositionalEncoding, self).__init__()
         self.dropout = nn.Dropout(p=dropout)
 
@@ -494,17 +529,27 @@ class PositionalEncoding(nn.Module):
         self.register_buffer('pe', pe)
 
     def forward(self, x):
+        """
+
+        Args:
+            x:
+
+        Returns:
+
+        """
         x = x + self.pe
 
         return self.dropout(x)
 
 
-def create_model(args, use_lm_finetune: bool):
+def create_model(args, use_lm_finetune: bool) -> PreTrainedModel:
     """
+    PreTrainedModel 继承 torch.nn.Module，是所有 Auto 模型的基类
     根据指定路径（args.model_name_or_path）加载一个因果语言模型（如 GPT），
     如果不需要微调，则将其转为半精度以节省显存；否则保持全精度用于训练。
     :param args:
     :param use_lm_finetune: 是否使用微调
+
     """
     # AutoModelForCausalLM 自动加载一个自回归语言模型（如 GPT 系列）
     model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path)

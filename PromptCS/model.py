@@ -1,7 +1,7 @@
 import math
 import torch.nn as nn
 import torch
-from torch import Tensor
+from torch import Tensor, LongTensor
 from torch.nn.utils.rnn import pad_sequence
 from transformers import AutoModelForCausalLM, AutoTokenizer, RobertaConfig, RobertaModel, PreTrainedModel
 from typing import List, Tuple
@@ -199,19 +199,25 @@ class PromptCS(nn.Module):
                 raw_embeds[bidx, blocked_indices[bidx, i], :] = replace_embeds[i, :]
         return raw_embeds
 
-    def get_query(self, x_h, x_t=None) -> Tuple[torch.LongTensor, int]:
+    def get_query(self, x_h: str, x_t: str = None) -> Tuple[torch.LongTensor, int]:
         """
-        构造 Prompt-based 输入；最终结构为：[P][P] head [P] [SEP] target [EOS]
+        将输入文本转为token id，并构造 Prompt-based 输入；最终结构为：[P][P] head [P] [SEP] target [EOS]
         在代码-文本匹配任务中，x_t 代表代码，x_t 代表描述
-        :param x_h: 头实体
-        :param x_t: 目标实体
-        :return: input_ids: 张量形式的 token IDs
-                 len(left): left 部分的长度，用于后续定位关键位置（如 [MASK] 或 prompt 区域）;
-                 len(left) 作用:
+
+        Args:
+            x_h: 头实体文本
+            x_t: 目标实体文本
+
+        Returns:
+            Tuple[torch.LongTensor, int]:
+                input_ids: 张量形式的 token IDs
+                len(left): left 部分的长度，用于后续定位关键位置（如 [MASK] 或 prompt 区域）;
+                len(left) 作用:
                     1、在 forward 中用于计算 attention mask
                     2、或用于提取 prompt embeddings 的位置
                     3、或作为 sum_idx 用于定位生成起始位置
         """
+
         '''
         self.tokenizer.tokenize(x_h) 对头实体分词，并取最大代码长度
         tokenizer.convert_tokens_to_ids 转为 token ID
@@ -264,18 +270,22 @@ class PromptCS(nn.Module):
 
         return inputs, inputs_embeds, attention_mask
 
-    def forward(self, x_hs=None, x_ts=None):
+    def forward(self, x_hs: List[str] = None, x_ts: List[str] = None):
         """
-        这种设计通常用于支持多种输入模式（比如有时只传历史，有时同时传历史和目标）
-        :param x_hs: 头实体序列（head sequence）
-        :param x_ts: 目标实体序列（target sequence）
-        :return:
+        这种设计通常用于支持多种输入模式（比如有时只传头实体，有时同时传头实体和目标实体）
+        Args:
+            x_hs: 头实体序列（head sequence）
+            x_ts: 目标实体序列（target sequence）
+
+        Returns:
+
         """
+
         # batch size
         bz = len(x_hs)
 
         if x_ts is not None:
-            # 所有输入的ids
+            # 同一批次样本所有输入的ids
             inputs, sum_idx, ext_inputs = [], [], []
             for i in range(bz):
                 input_ids, idx = self.get_query(x_hs[i], x_ts[i])

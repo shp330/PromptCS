@@ -363,7 +363,7 @@ class PromptCS(nn.Module):
 
         # batch size
         bz = len(x_hs)
-
+        # 推理
         if x_ts is not None:
             # 同一批次样本所有输入的ids
             batch_input_ids, sum_idx, ext_inputs = [], [], []
@@ -393,11 +393,12 @@ class PromptCS(nn.Module):
             loss = loss / bz
 
             return loss
+        # 训练
         else:
             queries, sum_idx, tmp_idx = [], [], []
             for i in range(bz):
-                query, idx = self.get_query(x_h=x_hs[i])
-                queries.append(query)
+                input_ids, idx = self.get_query(x_h=x_hs[i])
+                queries.append(input_ids)
                 sum_idx.append(idx)
                 tmp_idx.append(idx)
 

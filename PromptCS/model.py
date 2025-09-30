@@ -161,7 +161,7 @@ class PromptCS(nn.Module):
 
     def embed_input(self, queries_token_ids: Tensor) -> Tensor:
         """
-        根据 mode（PromptCS | Finetune） 对输入的 prompt token的嵌入向量进行学习，并返回学习结果嵌入张量张量
+        根据 mode（PromptCS | Finetune）获取输入嵌入向量
 
         Args:
             queries_token_ids(Tensor): Token id. 大小为 B x L x * 的张量. B 为批次大小；L 为填充后的序列长度
@@ -315,7 +315,10 @@ class PromptCS(nn.Module):
     def prepare_inputs(self, batch_input_ids: List[torch.LongTensor]) -> Tuple[
         torch.LongTensor, torch.LongTensor, torch.LongTensor]:
         """
-        使用 pad_token_id 对输入 token ids 进行填充，并将"批量维度"置于第一个
+        输入预处理
+            使用 pad_token_id 对输入 token ids 进行填充，并将"批量维度"置于第一个；
+            生成注意力掩码；
+            获取输入嵌入向量
 
         Args:
             batch_input_ids: 批次所有输入的 token ids 列表
@@ -323,11 +326,18 @@ class PromptCS(nn.Module):
         Returns:
             填充后的输入token ids Tensor,
             输入嵌入,
-            注意力掩码嵌入
+            注意力掩码
         """
         batch_input_ids = pad_sequence(batch_input_ids, True, padding_value=self.pad_token_id).long().to(self.device)
 
+        # 生成注意力掩码
+        # 作用：Transformer 模型在计算注意力时默认会关注序列所有位置，
+        #      如果不屏蔽 padding，模型会把 padding token 当成正常 token 参与计算，影响结果，
+        #      attention_mask 会在计算时屏蔽 padding 位置的影响
         #
+        # 生成一个和 batch_input_ids 形状相同的布尔 tensor
+        # True 表示该位置是真实 token（需要被注意力机制关注）
+        # False 表示该位置是 padding（需要在注意力计算中被忽略）
         attention_mask = batch_input_ids != self.pad_token_id
         inputs_embeds = self.embed_input(batch_input_ids)
 

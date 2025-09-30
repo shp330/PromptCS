@@ -128,7 +128,7 @@ class PromptCS(nn.Module):
         #  'sum'：求和
         #  'none'：不归约，返回每个样本的损失
         #
-        ## 为什么用 'sum'？
+        ## 为什么用 'sum'
         #  1、在某些训练策略中（如梯度累积、动态 batch size），使用 sum 比 mean 更容易控制学习率和梯度尺度。
         #  2、特别是在序列到序列任务中，按 sum 计算可以更好地反映整体生成质量。
         #
@@ -190,31 +190,75 @@ class PromptCS(nn.Module):
 
     def cstuning_embed_input(self, queries_token_ids: Tensor):
         """
-        获取PromptCS模式的输入嵌入向量
+        生成 PromptCS 模式的输入嵌入向量，其中伪 token 位置由可学习的 prompt embeddings 替换。
+        该方法将输入序列中的特定 token（如 [PROMPT]）替换为可训练的 prompt embeddings，
+        实现“软提示”（soft prompt）注入，用于提示微调（prompt tuning）。
 
         Args:
-            queries_token_ids:  经过填充的输入 token id 张量
+            queries_token_ids:  包含经过填充的输入 token 的 id 的张量，形状为 (batch_size, sequence_length)，
+                 其中包含用于 prompt 的伪 token（如 `self.pseudo_token_id`）。
 
         Returns:
-            Tensor: 学习后的 prompt embeddings
+            Tensor: 形状为 (batch_size, sequence_length, hidden_size) 的嵌入张量，
+            其中伪 token 位置已被可学习的 prompt embeddings 替换。学习后的 prompt embeddings
 
+        Example:
+            输入:
+                queries_token_ids = [
+                    [101, 50000, 50000, 7592, 2087, 102],  # [CLS] [P] [P] "hello" "world" [SEP]
+                    [101, 50000, 50000, 1996, 2000, 102]   # [CLS] [P] [P] "how" "are" [SEP]
+                ]
+
+                # 形状: (bz, spell_length), spell_length 是伪 prompt 的长度
+                # 每一行表示一个样本中所有 [PROMPT] token 在序列中的位置。后续用于替换这些位置的 embedding。
+                blocked_indices =[
+                  [1, 2],  # 第 0 个样本中，prompt 在位置 1 和 2
+                  [1, 2]   # 第 1 个样本中，prompt 在位置 1 和 2
+                ]
+
+            输出: [CLS] + (learned_prompt_embeds) + [hello] [world] [SEP]
+
+
+        Notes:
+            输入序列里会插入一些特殊的 “伪 token” 占位符, 这些占位符在原始词表里没有实际意义，我们不希望用它的 embedding,
+            所以先把它们替换成 UNK token，让 embedding 层用 UNK 的向量作为临时值,
+            之后再用 self.prompt_agent() 生成的可学习 prompt embedding 覆盖这些位置
         """
         # batch size
         bz = queries_token_ids.shape[0]
+        # 复制输入 token ids，用于后续嵌入查找
         queries_for_embedding = queries_token_ids.clone()
-        # 从输入 token ids 中获取伪 prompt token ids？？
+        # 将伪 token ID 替换为 [UNK]，避免其对原始 embedding 干扰
+        # 这样在查嵌入表时，这些位置会使用 [UNK] 的 embedding（或后续被替换）
+        #
+        ## 语法：
+        # 找到 queries_token_ids 中所有值等于 self.pseudo_token_id 的位置，
+        # 然后把 queries_for_embedding 中对应位置的值替换为 self.unk_token_id。
+        #
+        ## 这在Prompt Tuning、Prefix Tuning 等场景中经常用来：
+        # 先把 “伪 token” 位置替换成 UNK（未知词），后面再用自定义的 embedding 覆盖这些位置
         queries_for_embedding[(queries_token_ids == self.pseudo_token_id)] = self.unk_token_id
-        # 从输入token id 查询嵌入向量张量
-        raw_embeds = self.embeddings(queries_for_embedding)
-        # ？？
-        blocked_indices = (queries_token_ids == self.pseudo_token_id).nonzero().reshape((bz, self.spell_length, 2))[:,
-                          :, 1]  # bz
-        # 学习后的 prompt embedding
-        # 对象调用，执行 forward 方法，得到 prompt 输出嵌入张量
+        # 获取原始嵌入：先用替换后的 token ids 查嵌入表
+        raw_embeds = self.embeddings(queries_for_embedding) # (bz, seq_len, hidden_size)
+
+        # 找出所有伪 token 的位置（即 prompt 应插入的位置）, 并提取其在序列中的列索引
+        # 注意：假设每个样本有 self.spell_length 个连续的伪 token
+        # 结果: (bz, spell_length)，每行是该样本中 prompt token 在序列中的位置索引
+        blocked_indices = (
+            (queries_token_ids == self.pseudo_token_id)
+            .nonzero()
+            .reshape((bz, self.spell_length, 2))[:, :, 1]
+        )
+
+        # 获取学习后的 prompt embeddings
+        # 对象调用：调用 prompt_agent 的 forward 方法，返回 (spell_length, hidden_size)
+        # replace_embeds 列表的长度为虚拟prompt token 的长度
         replace_embeds = self.prompt_agent()
-        for bidx in range(bz):
+        for bidx in range(bz): # bidx 批索引，代笔第几个样本
             for i in range(self.prompt_agent.spell_length):
-                # 更新 prompt embedding
+                # 更新 prompt embedding，将原始嵌入的 prompt token 的位置更新为对应的学习后的prompt embedding
+                # 注意：每个样本特定位置的 prompt token 的学习后的嵌入相同
+                # blocked_indices[bidx, i] 表示 第 bidx 个样本的第 i 个 prompt 位置
                 raw_embeds[bidx, blocked_indices[bidx, i], :] = replace_embeds[i, :]
         return raw_embeds
 
@@ -383,7 +427,8 @@ class PromptAgent(torch.nn.Module):
 
     Attributes:
         spell_length(int): prompt template 的长度
-
+        embedding(torch.nn.Embedding): 代表 prompt token 序列的嵌入
+        seq_indices(torch.LongTensor): 代笔 prompt token 索引的张量
     """
 
     def __init__(self, template, hidden_size, tokenizer, device, args):
@@ -418,6 +463,7 @@ class PromptAgent(torch.nn.Module):
         #
         # 如：假设 cloze_length=[2,3]，tensor shape 为 [1, 5]：tensor([[True, True, True, True, True]])
         self.cloze_mask = torch.LongTensor(self.cloze_mask).bool().to(self.device)
+
         # self.cloze_mask[0] 是第一个（也是唯一一个）序列的 mask，长度为 cloze_length[0] + cloze_length[1]
         self.seq_indices = torch.LongTensor(list(range(len(self.cloze_mask[0])))).to(self.device)
 
@@ -455,6 +501,7 @@ class PromptAgent(torch.nn.Module):
         #
         ## .to(self.device) 将嵌入层移动到指定设备（CPU/GPU）
         self.embedding = torch.nn.Embedding(len(self.cloze_mask[0]), self.embed_size).to(self.device)
+
         #### 创建两层的 MLP（多层感知机），也叫 Projection Head 或 Transformation Head。
         ## MLP 作用：将随机初始化的 prompt embeddings 进行非线性变换，
         # 使其更接近真实 token 的 embedding 分布，以提升训练稳定性和效果
@@ -473,14 +520,13 @@ class PromptAgent(torch.nn.Module):
 
     def forward(self) -> Tensor:
         """
-        对所有 prompt 嵌入向量进行学习
-        1、根据 index 查找 prompt 嵌入；
+        对所有 prompt token 嵌入向量进行学习
+        1、根据 index 查找 prompt token 的嵌入；
         2、通过 prompt agent 进行编码；
         3、将编码结果经过 MLP 后，得到输出嵌入向量
         Returns:
-            输出嵌入向量
+            学习后的 prompt token 的嵌入向量
         """
-
         '''
         ## 从 self.embedding 查找表中按 self.seq_indices 索引指定的顺序和位置取出嵌入向量。
            输出是一个张量，形状为[num_embeddings, embedding_dim], 其中 num_embeddings = len(self.seq_indices)

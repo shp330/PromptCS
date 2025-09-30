@@ -167,20 +167,20 @@ class PromptCS(nn.Module):
             queries_token_ids(Tensor): Token id. 大小为 B x L x * 的张量. B 为批次大小；L 为填充后的序列长度
 
         Returns:
-            Tensor: 输入中的 prompt token 的嵌入学习结果张量
-
+            Tensor: 形状为 (batch_size, sequence_length, hidden_size) 的嵌入张量
         """
         if self.mode == 'PromptCS':
             return self.cstuning_embed_input(queries_token_ids)
         else:
             return self.finetune_embed_input(queries_token_ids)
 
-    def finetune_embed_input(self, queries_token_ids):
+    def finetune_embed_input(self, queries_token_ids: Tensor):
         """
         获取微调模式的输入嵌入向量
 
         Args:
-            queries_token_ids: 经过填充的输入 token id 张量
+            queries_token_ids: 包含经过填充的输入 token 的 id 的张量，形状为 (batch_size, sequence_length)，
+                 其中包含用于 prompt 的伪 token（如 `self.pseudo_token_id`）
 
         Returns:
             所有输入 token 的嵌入向量张量
@@ -239,7 +239,7 @@ class PromptCS(nn.Module):
         # 先把 “伪 token” 位置替换成 UNK（未知词），后面再用自定义的 embedding 覆盖这些位置
         queries_for_embedding[(queries_token_ids == self.pseudo_token_id)] = self.unk_token_id
         # 获取原始嵌入：先用替换后的 token ids 查嵌入表
-        raw_embeds = self.embeddings(queries_for_embedding) # (bz, seq_len, hidden_size)
+        raw_embeds = self.embeddings(queries_for_embedding)  # (bz, seq_len, hidden_size)
 
         # 找出所有伪 token 的位置（即 prompt 应插入的位置）, 并提取其在序列中的列索引
         # 注意：假设每个样本有 self.spell_length 个连续的伪 token
@@ -254,7 +254,7 @@ class PromptCS(nn.Module):
         # 对象调用：调用 prompt_agent 的 forward 方法，返回 (spell_length, hidden_size)
         # replace_embeds 列表的长度为虚拟prompt token 的长度
         replace_embeds = self.prompt_agent()
-        for bidx in range(bz): # bidx 批索引，代笔第几个样本
+        for bidx in range(bz):  # bidx 批索引，代笔第几个样本
             for i in range(self.prompt_agent.spell_length):
                 # 更新 prompt embedding，将原始嵌入的 prompt token 的位置更新为对应的学习后的prompt embedding
                 # 注意：每个样本特定位置的 prompt token 的学习后的嵌入相同
@@ -292,7 +292,8 @@ class PromptCS(nn.Module):
         左右：构建包含 soft prompt 和头实体的左侧上下文。    
         '''
         left = self.prompt_tokens * self.template[0] + self.tokenizer.convert_tokens_to_ids(
-            self.tokenizer.tokenize(x_h)[:self.max_code_length]) + self.prompt_tokens * self.template[1]
+            self.tokenizer.tokenize(x_h)[:self.max_code_length]
+        ) + self.prompt_tokens * self.template[1]
 
         if x_t is not None:
             '''
@@ -302,7 +303,8 @@ class PromptCS(nn.Module):
                 2、推理时：x_t=None，right=[]，模型需自回归生成
             '''
             right = self.tokenizer.convert_tokens_to_ids(
-                self.tokenizer.tokenize(x_t)[:self.max_target_length]) + self.eos_tokens
+                self.tokenizer.tokenize(x_t)[:self.max_target_length]
+            ) + self.eos_tokens
         else:
             right = []
 
@@ -468,17 +470,21 @@ class PromptAgent(torch.nn.Module):
         self.seq_indices = torch.LongTensor(list(range(len(self.cloze_mask[0])))).to(self.device)
 
         if args.prompt_encoder_type == "lstm":
-            self.prompt_encoder = Encoder_BiLSTM(input_size=self.hidden_size,
-                                                 hidden_size=self.hidden_size // 2,
-                                                 num_layers=2,
-                                                 dropout=0.0,
-                                                 bidirectional=True,
-                                                 batch_first=True)
+            self.prompt_encoder = Encoder_BiLSTM(
+                input_size=self.hidden_size,
+                hidden_size=self.hidden_size // 2,
+                num_layers=2,
+                dropout=0.0,
+                bidirectional=True,
+                batch_first=True
+            )
         elif args.prompt_encoder_type == "transformer":
-            self.prompt_encoder = Encoder_Transformer(d_model=self.hidden_size,
-                                                      nhead=8,
-                                                      num_layers=6,
-                                                      max_len=len(self.cloze_mask[0]))
+            self.prompt_encoder = Encoder_Transformer(
+                d_model=self.hidden_size,
+                nhead=8,
+                num_layers=6,
+                max_len=len(self.cloze_mask[0])
+            )
         #### 创建一个可训练的嵌入层，用于生成 soft prompt 的初始向量表示。
         ##   self.embedding 相当于创建了一个可训练的查找表，该表可在 forward 前向过程中供查询使用
         #
@@ -513,9 +519,11 @@ class PromptAgent(torch.nn.Module):
         ## nn.Linear(in, out) 全连接层，参数：in_features, out_features 输入、输出维度
         #
         ## 最后一层线性变换：将特征映射回原始维度
-        self.mlp_head = nn.Sequential(nn.Linear(self.hidden_size, self.hidden_size),
-                                      nn.ReLU(),
-                                      nn.Linear(self.hidden_size, self.hidden_size))
+        self.mlp_head = nn.Sequential(
+            nn.Linear(self.hidden_size, self.hidden_size),
+            nn.ReLU(),
+            nn.Linear(self.hidden_size, self.hidden_size)
+        )
         print("init prompt encoder...")
 
     def forward(self) -> Tensor:
@@ -555,12 +563,14 @@ class PromptAgent(torch.nn.Module):
 class Encoder_BiLSTM(nn.Module):
     def __init__(self, input_size, hidden_size, num_layers, dropout, bidirectional, batch_first):
         super(Encoder_BiLSTM, self).__init__()
-        self.lstm_head = torch.nn.LSTM(input_size=input_size,
-                                       hidden_size=hidden_size,
-                                       num_layers=num_layers,
-                                       dropout=dropout,
-                                       bidirectional=bidirectional,
-                                       batch_first=batch_first)
+        self.lstm_head = torch.nn.LSTM(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            dropout=dropout,
+            bidirectional=bidirectional,
+            batch_first=batch_first
+        )
 
     def forward(self, inputs):
         outputs = self.lstm_head(inputs)[0]
@@ -614,8 +624,11 @@ class PositionalEncoding(nn.Module):
 
         pe = torch.zeros(max_len, d_model)
         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)  # [[0],[1],...[4999]] 5000 * 1
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(
-            10000.0) / d_model))  # e ^([0, 2,...,198] * -ln(10000)(-9.210340371976184) / 200) [1,0.912,...,(1.0965e-04)]
+        div_term = torch.exp(
+            torch.arange(0, d_model, 2).float() * (-math.log(
+                10000.0
+            ) / d_model)
+        )  # e ^([0, 2,...,198] * -ln(10000)(-9.210340371976184) / 200) [1,0.912,...,(1.0965e-04)]
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
         pe = pe.unsqueeze(0)

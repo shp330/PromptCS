@@ -10,11 +10,17 @@ from typing import List, Tuple
 class PromptCS(nn.Module):
     """
     Attributes:
-        mode: finetune 或 PromptCS
-        model: prompt agent 底层使用的模型
+        mode (str): finetune 或 PromptCS
+        model (PreTrainedModel): prompt agent 底层使用的模型
+        loss_fct (nn.CrossEntropyLoss): 损失函数；forward(input: Tensor, target: Tensor)
+        max_target_length (int): 生成的答案最大长度
+        max_code_length (int): 输入的代码使用的最大有效长度
     """
     mode: str
     model: PreTrainedModel
+    loss_fct: nn.CrossEntropyLoss
+    max_target_length: int
+    max_code_length: int
 
     def __init__(self, args, device, template: List[int]):
         """
@@ -273,14 +279,9 @@ class PromptCS(nn.Module):
 
         Returns:
             Tuple[torch.LongTensor, int]:
-                input_ids: 张量形式的 token IDs
-                len(left): left 部分的长度，用于后续定位关键位置（如 [MASK] 或 prompt 区域）;
-                len(left) 作用:
-                    1、在 forward 中用于计算 attention mask
-                    2、或用于提取 prompt embeddings 的位置
-                    3、或作为 sum_idx 用于定位生成起始位置
+                input_ids: tokenizer 编码后的 token id 序列
+                len(left): idx，用于在 forward 中标记目标序列的起始位置（后面用来切分 logits）
         """
-
         '''
         self.tokenizer.tokenize(x_h) 对头实体分词，并取最大代码长度
         tokenizer.convert_tokens_to_ids 转为 token ID
@@ -321,12 +322,13 @@ class PromptCS(nn.Module):
             获取输入嵌入向量
 
         Args:
-            batch_input_ids: 批次所有输入的 token ids 列表
+            batch_input_ids (List[LongTensor]): 批次所有输入的 token ids 列表
 
         Returns:
-            填充后的输入token ids Tensor,
-            输入嵌入,
-            注意力掩码
+            Tuple[torch.LongTensor, torch.LongTensor, torch.LongTensor]:
+                - batch_input_ids (torch.LongTensor): 填充后的输入token ids Tensor <br>
+                - inputs_embeds (torch.LongTensor): 输入嵌入 <br>
+                - attention_mask (torch.LongTensor): 注意力掩码
         """
         batch_input_ids = pad_sequence(batch_input_ids, True, padding_value=self.pad_token_id).long().to(self.device)
 
@@ -350,24 +352,31 @@ class PromptCS(nn.Module):
 
         return batch_input_ids, inputs_embeds, attention_mask
 
-    def forward(self, x_hs: List[str] = None, x_ts: List[str] = None):
+    def forward(self, x_hs: List[str] = None, x_ts: List[str] = None) -> List[str]:
         """
-        这种设计通常用于支持多种输入模式（比如有时只传头实体，有时同时传头实体和目标实体）
+        训练模型，或生成答案
         Args:
-            x_hs: 头实体序列（head sequence）
-            x_ts: 目标实体序列（target sequence）
+            x_hs: 头实体序列（head sequence）通常是自然语言描述或实体名
+            x_ts: 目标实体序列（target sequence）可选
 
         Returns:
+            List[str]: 批次所有样本的答案
 
+        Notes:
+            这种设计支持两种模式：
+                训练模式：同时传入 x_hs 和 x_ts（有目标，计算 loss）
+                推理模式：只传入 x_hs（无目标，生成答案）
         """
-
         # batch size
         bz = len(x_hs)
-        # 推理
+        # 训练模式，计算 loss
         if x_ts is not None:
             # 同一批次样本所有输入的ids
             batch_input_ids, sum_idx, ext_inputs = [], [], []
             for i in range(bz):
+                # 构造模板化的 prompt 模型输入：prompt + input + target
+                # input_ids：tokenizer 编码后的 token id 序列
+                # idx：记录 target 开始位置（后面用来切分 logits），用于后续计算 loss
                 input_ids, idx = self.get_query(x_hs[i], x_ts[i])
                 batch_input_ids.append(input_ids)
                 sum_idx.append(idx)
@@ -376,25 +385,48 @@ class PromptCS(nn.Module):
 
             output = self.model(inputs_embeds=inputs_embeds, attention_mask=attention_mask)
 
+            # logits 形状：(batch_size, sequence_length, vocab_size)
             logits = output.logits
             loss = None
 
             for i in range(bz):
-                # ？？
+                # input 构造：prompt + [SEP] + target
+                # [SEP] token 的索引；
                 idx = sum_idx[i]
+                # shift_logits 取 [idx:-1, :]；即，从 [SEP] 位置开始，其值是下一个 token 的分数;即，模型读完 [SEP] 后开始生成 response
+                # shift_labels 取 [idx + 1:]；即，从 [SEP] 的下一个 token 开始，这样 logits[idx] 预测的是 labels[idx+1]
+                # 从目标序列起始位置到末尾（不包含最后一个 token）
+                #
+                ## logits[i]: 第 i 个样本的输出 logits，形状为 (seq_len, vocab_size)
+                ## logits[i][idx:-1, :]: 取从 idx 到倒数第二个 token 的 logits
+                ## .contiguous(): 确保内存连续，为后续 view 做准备
                 shift_logits = logits[i][idx:-1, :].contiguous()
+
+                # 获取 target 部分的真实标签。目标序列向后偏移一位（语言模型的标准做法）
+                # batch_input_ids[i][idx + 1:]: 从 idx+1 开始到最后的真实 token ID
                 shift_labels = batch_input_ids[i][idx + 1:].contiguous()
 
                 if loss is None:
-                    loss = self.loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+                    # CrossEntropyLoss, input: Tensor, target: Tensor
+                    # shift_logits.view(-1, vocab_size)：展平成 (target_len, vocab_size)
+                    # shift_labels.view(-1)：展平成 (target_len,)
+                    loss = self.loss_fct(
+                        shift_logits.view(-1, shift_logits.size(-1)),
+                        shift_labels.view(-1)
+                    )
                 else:
-                    loss += self.loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+                    loss += self.loss_fct(
+                        shift_logits.view(-1, shift_logits.size(-1)),
+                        shift_labels.view(-1)
+                    )
 
             loss = loss / bz
 
             return loss
-        # 训练
+        # 自回归生成（autoregressive generation）流程，
+        # 用于在给定前缀（如 prompt 或 head）后，生成目标文本（如 answer 或 response）
         else:
+            # tmp_idx 当前正在生成的 token 的索引，每生成一个token，则往前移动 1
             queries, sum_idx, tmp_idx = [], [], []
             for i in range(bz):
                 input_ids, idx = self.get_query(x_h=x_hs[i])
@@ -412,11 +444,15 @@ class PromptCS(nn.Module):
                     idx = tmp_idx[i]
                     tmp_idx[i] += 1
                     next_token_logits = logits[i, idx:idx + 1, :]
+                    # 返回值最大的元素的 values, indices
                     _, next_token = torch.max(next_token_logits, dim=1)
 
-                    queries[i] = torch.cat([queries[i].to(self.device), next_token], dim=0)
+                    queries[i] = torch.cat(
+                        [queries[i].to(self.device), next_token],
+                        dim=0
+                    )
 
-            answer = []
+            answers = []
             for i in range(bz):
                 idx = sum_idx[i]
                 t = queries[i][idx + 1:]
@@ -424,9 +460,9 @@ class PromptCS(nn.Module):
                 if self.eos_token_id in t:
                     t = t[:t.index(self.eos_token_id)]
                 words = self.tokenizer.decode(t).replace('\n', '')
-                answer.append(words)
+                answers.append(words)
 
-            return answer
+            return answers
 
 
 class PromptAgent(torch.nn.Module):

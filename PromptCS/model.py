@@ -366,6 +366,13 @@ class PromptCS(nn.Module):
             这种设计支持两种模式：
                 训练模式：同时传入 x_hs 和 x_ts（有目标，计算 loss）
                 推理模式：只传入 x_hs（无目标，生成答案）
+
+            改进建议：
+                该方法实现了基于贪心解码的自回归文本生成；可以如下改进：
+                    1、支持 early stopping：如果某个样本已经生成了 <EOS>，可以不再继续预测它
+                    2、改用 beam search / 采样：贪心解码速度快但生成多样性差
+                    3、并行化生成：当前实现是串行的（每次生成一个 token 再拼回去），HuggingFace 的 generate() 内部有更高效的实现
+
         """
         # batch size
         bz = len(x_hs)
@@ -435,6 +442,10 @@ class PromptCS(nn.Module):
                 tmp_idx.append(idx)
 
             for _ in range(self.max_target_length):
+                #### 问题 1：每次生成一个 token 都重新 encode 整个序列（效率极低）
+                # 这是典型的 "naive autoregressive decoding"，复杂度为O(T^2)
+                #
+                ## 建议：使用 KV Cache（Key-Value Caching）：使用 model.generate() 或手动实现带缓存的解码。
                 batch_input_ids, inputs_embeds, attention_mask = self.prepare_inputs(queries)
 
                 output = self.model(inputs_embeds=inputs_embeds, attention_mask=attention_mask)
@@ -445,8 +456,16 @@ class PromptCS(nn.Module):
                     tmp_idx[i] += 1
                     next_token_logits = logits[i, idx:idx + 1, :]
                     # 返回值最大的元素的 values, indices
+                    #
+                    #### 问题 2：贪心搜索（torch.max）缺乏灵活性
+                    # torch.max 等价于贪心搜索（greedy search），容易陷入重复或平凡解。
+                    #
+                    ## 建议：（1）Top-k / Top-p (nucleus) sampling；（2）Temperature 调节；（3）Beam Search
                     _, next_token = torch.max(next_token_logits, dim=1)
-
+                    #### 问题 3：queries[i] = torch.cat(...) 是高开销操作
+                    # torch.cat 每次都创建新 tensor，复制旧数据；随着生成进行，每次拼接越来越慢；内存碎片化。
+                    #
+                    ## 建议：预分配最大长度的 buffer，用索引写入。
                     queries[i] = torch.cat(
                         [queries[i].to(self.device), next_token],
                         dim=0

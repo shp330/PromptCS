@@ -5,6 +5,7 @@ from torch import Tensor, LongTensor
 from torch.nn.utils.rnn import pad_sequence
 from transformers import AutoModelForCausalLM, AutoTokenizer, RobertaConfig, RobertaModel, PreTrainedModel
 from typing import List, Tuple
+from __future__ import annotations
 
 
 class PromptCS(nn.Module):
@@ -627,7 +628,26 @@ class PromptAgent(torch.nn.Module):
 
 
 class Encoder_BiLSTM(nn.Module):
+    """
+    Attributes:
+        lstm_head:
+    """
+    lstm_head: nn.LSTM
+
     def __init__(self, input_size, hidden_size, num_layers, dropout, bidirectional, batch_first):
+        """
+
+        Args:
+            input_size: 输入特征维度
+            hidden_size: 隐藏层维度
+            num_layers: 层数
+            dropout: 除最后一层外，每层输出的 dropout 概率。
+                只有当 num_layers > 1 时，LSTM 的 dropout 才会生效（在层间应用）
+            bidirectional: 是否双向。当 bidirectional=True 时，输出维度会翻倍（hidden_size * 2）；
+                最终 hidden_size * 2 列特征中，前一半来自正向 LSTM，后一半来自反向 LSTM。
+                常用于序列标注、机器翻译等任务中，让模型同时利用过去和未来的信息
+            batch_first: batch 输入特征的第一维是否为批次。即，输入形状是否为 [batch, seq_len, feature]
+        """
         super(Encoder_BiLSTM, self).__init__()
         self.lstm_head = torch.nn.LSTM(
             input_size=input_size,
@@ -639,51 +659,93 @@ class Encoder_BiLSTM(nn.Module):
         )
 
     def forward(self, inputs):
-        outputs = self.lstm_head(inputs)[0]
-
-        return outputs
-
-
-class Encoder_Transformer(nn.Module):
-    def __init__(self, d_model, nhead, num_layers, max_len):
-        """
-
-        Args:
-            d_model:
-            nhead:
-            num_layers:
-            max_len:
-        """
-        super(Encoder_Transformer, self).__init__()
-        self.encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead)
-        self.encoder = nn.TransformerEncoder(self.encoder_layer, num_layers=num_layers)
-        self.pos_embedding = PositionalEncoding(d_model, 0.1, max_len)
-
-    def forward(self, inputs):
         """
 
         Args:
             inputs:
 
         Returns:
+            [0] 表示只取【所有时间步的隐藏状态】。
+            形状为：
+                如果 batch_first=True: (batch_size, seq_len, hidden_size * num_directions)
+                否则: (seq_len, batch_size, hidden_size * num_directions)
 
+        Notes:
+            nn.LSTM 的 forward 返回一个元组：
+                output, (h_n, c_n) = lstm(inputs)
+            output：所有时间步的隐藏状态
+                形状：[batch, seq_len, hidden_size * num_directions]
+            h_n：最后一个时间步的隐藏状态（每个层、每个方向）;
+                形状：[num_layers * num_directions, batch, hidden_size]
+            c_n：最后一个时间步的单元状态（cell state）
+                形状：[num_layers * num_directions, batch, hidden_size]
         """
-        input_embedding = self.pos_embedding(inputs)
-        input_embedding = input_embedding.permute(1, 0, 2)
+        outputs = self.lstm_head(inputs)[0]
 
+        return outputs
+
+
+class Encoder_Transformer(nn.Module):
+    """
+    Attributes:
+        encoder_layer: 编码器层
+        encoder: 编码器
+        pos_embedding: 位置编码
+    """
+    encoder_layer: nn.TransformerEncoderLayer
+    encoder: nn.TransformerEncoder
+    pos_embedding: PositionalEncoding
+
+    def __init__(self, d_model: int, nhead: int, num_layers: int, max_len: int):
+        """
+        Args:
+            d_model (int): 模型隐藏层维度（必须能被 nhead 整除）
+            nhead (int): 多头注意力机制的头数
+            num_layers (int): Transformer 编码器堆叠的层数
+            max_len (int): 位置编码的最大长度（通常是输入序列的最大长度，此处输入是 prompt）
+        """
+        super(Encoder_Transformer, self).__init__()
+        # TransformerEncoderLayer 单个 Transformer 编码器层，包含：多头自注意力 + 前馈网络（FFN）
+        self.encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead)
+        # 多个编码器层堆叠而成
+        self.encoder = nn.TransformerEncoder(self.encoder_layer, num_layers=num_layers)
+        # 位置编码层（自定义类），给输入 embedding 加入位置信息
+        self.pos_embedding = PositionalEncoding(d_model, 0.1, max_len)
+
+    def forward(self, inputs):
+        """
+        Args:
+            inputs: prompt 嵌入，形状为 (batch, seq_len, d_model)
+
+        Returns:
+            prompt 编码结果，形状为 (batch, seq_len, d_model)
+        """
+        # inputs 通常是形状为 (batch, seq_len, d_model) 的张量
+        # pos_embedding 会在 embedding 上加上位置编码
+        input_embedding = self.pos_embedding(inputs)
+        # PyTorch 官方 Transformer 要求输入形状为 (seq_len, batch, d_model)
+        # 所以需要交换前两个维度（如果原本是 batch_first=True）
+        input_embedding = input_embedding.permute(1, 0, 2)
+        # self.encoder(input_embedding) 输出形状：(seq_len, batch, d_model)
+        # .permute([1, 0, 2]) 变回 (batch, seq_len, d_model)，方便后续处理
         outputs = self.encoder(input_embedding).permute([1, 0, 2])
 
         return outputs
 
 
 class PositionalEncoding(nn.Module):
+    """
+    Transformer 是顺序无关的，必须额外加入位置信息
+    PositionalEncoding 会给不同位置的 token 加上不同的正弦余弦编码
+    """
+
     def __init__(self, d_model, dropout=0.1, max_len=2501):
         """
-
         Args:
-            d_model:
+            d_model: 模型隐藏层维度（必须能被 nhead 整除）
             dropout:
-            max_len:
+            max_len: 最大长度（通常是输入序列的最大长度）
+            pe: 位置编码张量的 buffer
         """
         super(PositionalEncoding, self).__init__()
         self.dropout = nn.Dropout(p=dropout)
@@ -691,9 +753,8 @@ class PositionalEncoding(nn.Module):
         pe = torch.zeros(max_len, d_model)
         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)  # [[0],[1],...[4999]] 5000 * 1
         div_term = torch.exp(
-            torch.arange(0, d_model, 2).float() * (-math.log(
-                10000.0
-            ) / d_model)
+            torch.arange(0, d_model, 2).float() *
+            (-math.log(10000.0) / d_model)
         )  # e ^([0, 2,...,198] * -ln(10000)(-9.210340371976184) / 200) [1,0.912,...,(1.0965e-04)]
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
@@ -702,12 +763,11 @@ class PositionalEncoding(nn.Module):
 
     def forward(self, x):
         """
-
         Args:
-            x:
+            x: 输入的 prompt 嵌入
 
         Returns:
-
+            加上位置编码后的 prompt 嵌入；经过 dropout
         """
         x = x + self.pe
 

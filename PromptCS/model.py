@@ -741,6 +741,10 @@ class PositionalEncoding(nn.Module):
 
     def __init__(self, d_model, dropout=0.1, max_len=2501):
         """
+        Transformer 是顺序无关的（自注意力机制可以同时关注到所有位置）
+        但语言是有时序关系的，模型必须知道 token 的位置
+        位置编码（Positional Encoding） 就是给每个位置加上一个独特的编码向量，让模型能感知到 token 的顺序
+
         Args:
             d_model: 模型隐藏层维度（必须能被 nhead 整除）
             dropout:
@@ -751,11 +755,15 @@ class PositionalEncoding(nn.Module):
         self.dropout = nn.Dropout(p=dropout)
 
         pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)  # [[0],[1],...[4999]] 5000 * 1
+        # [max_len, 1]
+        # [[0],[1],...[4999]] shape: (5000, 1)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        # e ^([0, 2,...,198] * -ln(10000)(-9.210340371976184) / 200) [1,0.912,...,(1.0965e-04)]
+        # 维度分量
         div_term = torch.exp(
             torch.arange(0, d_model, 2).float() *
             (-math.log(10000.0) / d_model)
-        )  # e ^([0, 2,...,198] * -ln(10000)(-9.210340371976184) / 200) [1,0.912,...,(1.0965e-04)]
+        )
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
         pe = pe.unsqueeze(0)
@@ -764,11 +772,16 @@ class PositionalEncoding(nn.Module):
     def forward(self, x):
         """
         Args:
-            x: 输入的 prompt 嵌入
+            x: (batch_size, seq_len, d_model) 输入的 prompt 嵌入
 
         Returns:
             加上位置编码后的 prompt 嵌入；经过 dropout
+
+        Notes:
+            只取序列长度对应的位置编码：如果 x 和 pe 的第 2 维序列长度不一致会报错
+            x = x + self.pe[:, :x.size(1), :]  【是否需要如下优化：PROMPT 长度是固定的，所以不需要取 x.size(1)？】
         """
+        # 广播
         x = x + self.pe
 
         return self.dropout(x)

@@ -132,7 +132,7 @@ def main():
                         help="The test filename. Should contain the .jsonl files for this task.")  
 
     parser.add_argument("--max_code_length", default=300, type=int,
-                        help="The maximum total target sequence length after tokenization. Sequences longer "
+                        help="The maximum total input sequence length after tokenization. Sequences longer "
                              "than this will be truncated, sequences shorter will be padded.")
     parser.add_argument("--max_target_length", default=30, type=int,
                         help="The maximum total target sequence length after tokenization. Sequences longer "
@@ -199,11 +199,18 @@ def main():
 
         # Prepare optimizer and schedule (linear warmup and decay)
         t_total = len(train_dataloader) * args.num_train_epochs
-        optimizer = AdamW(filter(lambda p: p.requires_grad,
-                                 model.parameters()), lr=args.learning_rate, weight_decay=0.0001, eps=1e-8)
-        scheduler = get_linear_schedule_with_warmup(optimizer,
-                                                    num_warmup_steps=int(t_total*0.1),
-                                                    num_training_steps=t_total)
+        optimizer = AdamW(
+            filter(
+                lambda p: p.requires_grad,
+                model.parameters()
+            ),
+            lr=args.learning_rate, weight_decay=0.0001, eps=1e-8
+        )
+        scheduler = get_linear_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=int(t_total * 0.1),
+            num_training_steps=t_total
+        )
     
         #Start training
         logger.info("***** Running training *****")
@@ -213,7 +220,7 @@ def main():
 
         model.train()
         dev_dataset={}
-        nb_tr_steps,tr_loss,global_step,best_bleu,best_loss = 0,0,0,0,1e6
+        nb_tr_steps, tr_loss, global_step, best_bleu, best_loss = 0, 0, 0, 0, 1e6
         early_stopping_flag = 0
         start = time()
         checkpoint_start_time = time()
@@ -241,7 +248,7 @@ def main():
             if args.do_eval:
                 checkpoint_end_time = time()
                 early_stopping_flag += 1
-                #Calculate bleu  
+                # Calculate bleu
                 if 'dev_bleu' in dev_dataset:
                     eval_examples,eval_data=dev_dataset['dev_bleu']
                 else:
@@ -270,13 +277,14 @@ def main():
                 model.train()
 
                 predictions=[]
-                with open(os.path.join(args.output_dir,"dev.output"),'w', encoding='utf-8') as f, open(os.path.join(args.output_dir,"dev.gold"),'w',encoding='utf-8') as f1, open(os.path.join(args.output_dir, "dev.all.output"), 'w', encoding='utf-8') as f2:
-                    for ref,gold,raw in zip(p,eval_examples, all_out):
-                        predictions.append(str(gold.idx)+'\t'+ref)
-                        f.write(str(gold.idx)+'\t'+ref+'\n')
-                        f1.write(str(gold.idx)+'\t'+gold.target+'\n')
-                        f2.write(str(gold.idx)+'\t'+raw+'\n')
-
+                with open(os.path.join(args.output_dir, "dev.output"), 'w', encoding='utf-8') as f, \
+                    open(os.path.join(args.output_dir, "dev.gold"), 'w', encoding='utf-8') as f1, \
+                    open(os.path.join(args.output_dir, "dev.all.output"), 'w', encoding='utf-8') as f2:
+                    for ref, gold, raw in zip(p, eval_examples, all_out):
+                        predictions.append(str(gold.idx) + '\t' + ref)
+                        f.write(str(gold.idx) + '\t' + ref + '\n')
+                        f1.write(str(gold.idx) + '\t' + gold.target + '\n')
+                        f2.write(str(gold.idx) + '\t' + raw + '\n')
                 (goldMap, predictionMap) = bleu.computeMaps(predictions, os.path.join(args.output_dir, "dev.gold")) 
                 dev_bleu=round(bleu.bleuFromMaps(goldMap, predictionMap)[0],2)
                 logger.info("  " + "*" * 20)
@@ -350,7 +358,12 @@ def main():
 
             model.train()
             predictions=[]
-            with open(os.path.join(args.output_dir,"test_{}.output".format(str(idx))),'w',encoding='utf-8') as f, open(os.path.join(args.output_dir,"test_{}.gold".format(str(idx))),'w',encoding='utf-8') as f1, open(os.path.join(args.output_dir, "test.all.output"), 'w', encoding='utf-8') as f2:
+            with open(os.path.join(args.output_dir, "test_{}.output".format(str(idx))),
+                      'w', encoding='utf-8') as f, \
+                open(os.path.join(args.output_dir, "test_{}.gold".format(str(idx))),
+                     'w', encoding='utf-8') as f1, \
+                open(os.path.join(args.output_dir, "test.all.output"),
+                     'w', encoding='utf-8') as f2:
                 for ref,gold,raw in zip(p,eval_examples,all_out):
                     predictions.append(str(gold.idx)+'\t'+ref)
                     f.write(str(gold.idx)+'\t'+ref+'\n')

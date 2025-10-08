@@ -497,12 +497,9 @@ def main():
 
             model.train()
             predictions = []
-            with open(os.path.join(args.output_dir, "test_{}.output".format(str(idx))),
-                      'w', encoding='utf-8') as f, \
-                open(os.path.join(args.output_dir, "test_{}.gold".format(str(idx))),
-                     'w', encoding='utf-8') as f1, \
-                open(os.path.join(args.output_dir, "test.all.output"),
-                     'w', encoding='utf-8') as f2:
+            with open(os.path.join(args.output_dir, "test_{}.output".format(str(idx))), 'w', encoding='utf-8') as f, \
+                open(os.path.join(args.output_dir, "test_{}.gold".format(str(idx))), 'w', encoding='utf-8') as f1, \
+                open(os.path.join(args.output_dir, "test.all.output"), 'w', encoding='utf-8') as f2:
                 for ref, gold, raw in zip(p, eval_examples, all_out):
                     predictions.append(str(gold.idx) + '\t' + ref)
                     f.write(str(gold.idx) + '\t' + ref + '\n')

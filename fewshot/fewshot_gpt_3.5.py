@@ -53,7 +53,7 @@ def read_examples(filename):
 
 def set_seed(seed=2023):
     random.seed(seed)
-    os.environ['PYHTONHASHSEED'] = str(seed)
+    os.environ['PYTHON_HASH_SEED'] = str(seed)
 
 
 if __name__ == "__main__":

@@ -81,7 +81,7 @@ class PromptCSDataset(Dataset):
 
 def set_seed(seed=42):
     random.seed(seed)
-    os.environ['PYHTONHASHSEED'] = str(seed)
+    os.environ['PYTHON_HASH_SEED'] = str(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
